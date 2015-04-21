@@ -13,6 +13,7 @@ module Data.Conduit.Network.TLS
     , tlsConfigChain
     , tlsHost
     , tlsPort
+    , tlsWantClientCert
 --    , tlsCertificate
 --    , tlsKey
     , tlsNeedLocalAddr
@@ -59,6 +60,8 @@ import qualified Crypto.Random.AESCtr
 import qualified Network.Connection as NC
 import Control.Monad.Trans.Control
 import Data.Default
+import Data.IORef
+import Data.X509 (CertificateChain)
 
 
 makeCertDataPath :: FilePath -> [FilePath] -> FilePath -> TlsCertData
@@ -100,7 +103,7 @@ tlsConfigChain :: HostPreference
                -> [FilePath] -- ^ Chain certificates
                -> FilePath -- ^ Key
                -> TLSConfig
-tlsConfigChain a b c d e = TLSConfig a b (makeCertDataPath c d e) False
+tlsConfigChain a b c d e = TLSConfig a b (makeCertDataPath c d e) False False
 
 
 -- | Like 'tlsConfigBS', but also allow specifying chain certificates.
@@ -112,12 +115,12 @@ tlsConfigChainBS :: HostPreference
                  -> [S.ByteString] -- ^ Chain certificate raw data
                  -> S.ByteString -- ^ Key file raw data
                  -> TLSConfig
-tlsConfigChainBS a b c d e = TLSConfig a b (makeCertDataBS c d e) False
+tlsConfigChainBS a b c d e = TLSConfig a b (makeCertDataBS c d e) False False
 
-serverHandshake :: Socket -> TLS.Credentials -> IO (TLS.Context)
-serverHandshake socket creds = do
+serverHandshake :: Socket -> TLS.Credentials -> Bool -> IO (TLS.Context, Maybe CertificateChain)
+serverHandshake socket creds wantClientCert = do
     gen <- Crypto.Random.AESCtr.makeSystem
-
+    clientCertRef <- newIORef Nothing
     ctx <- TLS.contextNew
            TLS.Backend
                     { TLS.backendFlush = return ()
@@ -126,10 +129,18 @@ serverHandshake socket creds = do
                     , TLS.backendRecv = recvExact socket
                     }
             params
+              { TLS.serverHooks = def
+                  { TLS.onClientCertificate = \cert -> do
+                      writeIORef clientCertRef $ Just cert
+                      return TLS.CertificateUsageAccept
+                  }
+              }
             gen
 
     TLS.handshake ctx
-    return ctx
+
+    cert <- readIORef clientCertRef
+    return (ctx, cert)
 
   where
     params = def
@@ -143,7 +154,7 @@ serverHandshake socket creds = do
             }
         }
 
-runTCPServerTLS :: TLSConfig -> (AppData -> IO ()) -> IO ()
+runTCPServerTLS :: TLSConfig -> (AppData -> Maybe CertificateChain -> IO ()) -> IO ()
 runTCPServerTLS TLSConfig{..} app = do
     creds <- readCreds tlsCertData
 
@@ -156,8 +167,8 @@ runTCPServerTLS TLSConfig{..} app = do
       wrapApp creds = app'
         where
           app' socket addr mlocal = do
-            ctx <- serverHandshake socket creds
-            app (tlsAppData ctx addr mlocal)
+            (ctx, cert) <- serverHandshake socket creds tlsWantClientCert
+            app (tlsAppData ctx addr mlocal) cert
             TLS.bye ctx
 
 type ApplicationStartTLS = (AppData, (AppData -> IO ()) -> IO ()) -> IO ()
@@ -168,9 +179,9 @@ type ApplicationStartTLS = (AppData, (AppData -> IO ()) -> IO ()) -> IO ()
 -- client handlers will be discarded. If you have mutable state you want
 -- to share among multiple handlers, you need to use some kind of mutable
 -- variables.
-runGeneralTCPServerTLS :: MonadBaseControl IO m => TLSConfig -> (AppData -> m ()) -> m ()
+runGeneralTCPServerTLS :: MonadBaseControl IO m => TLSConfig -> (AppData -> Maybe CertificateChain -> m ()) -> m ()
 runGeneralTCPServerTLS config app = liftBaseWith $ \run ->
-  runTCPServerTLS config $ void . run . app
+  runTCPServerTLS config $ \ad cert -> void . run $ app ad cert
 
 -- | run a server un-crypted but also pass a call-back to trigger a StartTLS handshake
 -- on the underlying connection
@@ -209,7 +220,7 @@ runTCPServerStartTLS TLSConfig{..} app = do
                   }
                 -- wrap up the current connection with TLS
                 startTls = \app' -> do
-                  ctx <- serverHandshake socket creds
+                  (ctx, _) <- serverHandshake socket creds tlsWantClientCert
                   app' (tlsAppData ctx addr mlocal)
                   TLS.bye ctx
                 in
