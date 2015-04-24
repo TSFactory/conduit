@@ -86,7 +86,7 @@ tlsConfig a b c d = tlsConfigChain a b c [] d
 
 -- | allow to build a server config directly from raw bytestring data (exact same
 -- string as if the certificates were read from the filesystem).
--- this enables to plug another backend to fetch certifcates (other than FS) 
+-- this enables to plug another backend to fetch certifcates (other than FS)
 tlsConfigBS :: HostPreference
             -> Int          -- ^ port
             -> S.ByteString -- ^ Certificate raw data
@@ -129,7 +129,8 @@ serverHandshake socket creds wantClientCert = do
                     , TLS.backendRecv = recvExact socket
                     }
             params
-              { TLS.serverHooks = def
+              { TLS.serverWantClientCert = wantClientCert
+              , TLS.serverHooks = def
                   { TLS.onClientCertificate = \cert -> do
                       writeIORef clientCertRef $ Just cert
                       return TLS.CertificateUsageAccept
