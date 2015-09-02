@@ -135,7 +135,7 @@ serverHandshake socket creds wantClientCert = do
                       return TLS.CertificateUsageAccept
                   }
               }
-#if !MIN_VERSION_tls(1,3,0)	      
+#if !MIN_VERSION_tls(1,3,0)
             gen
 #endif
 
@@ -185,7 +185,7 @@ type ApplicationStartTLS = (AppData, (AppData -> IO ()) -> IO ()) -> IO ()
 -- Since 1.1.2
 runGeneralTCPServerTLS :: MonadBaseControl IO m => TLSConfig -> (AppData -> Maybe CertificateChain -> m ()) -> m ()
 runGeneralTCPServerTLS config app = liftBaseWith $ \run ->
-  runTCPServerTLS config $ void . run . app
+  runTCPServerTLS config $ \ad cert -> void . run $ app ad cert
 
 -- | run a server un-crypted but also pass a call-back to trigger a StartTLS handshake
 -- on the underlying connection
