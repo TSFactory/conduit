@@ -34,11 +34,8 @@ module Data.Conduit.Network.TLS
     , tlsClientConnectionContext
     ) where
 
-import Prelude hiding (FilePath, readFile)
 import Control.Applicative ((<$>), (<*>))
 import Control.Monad (forever, void)
-import Filesystem.Path.CurrentOS (FilePath)
-import Filesystem (readFile)
 import qualified Data.ByteString.Lazy as L
 import qualified Network.TLS as TLS
 import Data.Conduit.Network (sinkSocket, runTCPServerWithHandle, serverSettings, sourceSocket)
@@ -67,9 +64,9 @@ import Data.X509 (CertificateChain)
 makeCertDataPath :: FilePath -> [FilePath] -> FilePath -> TlsCertData
 makeCertDataPath certPath chainCertPaths keyPath =
     TlsCertData
-      (readFile certPath)
-      (mapM readFile chainCertPaths)
-      (readFile keyPath)
+      (S.readFile certPath)
+      (mapM S.readFile chainCertPaths)
+      (S.readFile keyPath)
 
 makeCertDataBS :: S.ByteString -> [S.ByteString] -> S.ByteString ->
                   TlsCertData
@@ -119,7 +116,9 @@ tlsConfigChainBS a b c d e = TLSConfig a b (makeCertDataBS c d e) False False
 
 serverHandshake :: Socket -> TLS.Credentials -> Bool -> IO (TLS.Context, Maybe CertificateChain)
 serverHandshake socket creds wantClientCert = do
+#if !MIN_VERSION_tls(1,3,0)
     gen <- Crypto.Random.AESCtr.makeSystem
+#endif
     clientCertRef <- newIORef Nothing
     ctx <- TLS.contextNew
            TLS.Backend
@@ -136,7 +135,9 @@ serverHandshake socket creds wantClientCert = do
                       return TLS.CertificateUsageAccept
                   }
               }
+#if !MIN_VERSION_tls(1,3,0)	      
             gen
+#endif
 
     TLS.handshake ctx
 
@@ -180,9 +181,11 @@ type ApplicationStartTLS = (AppData, (AppData -> IO ()) -> IO ()) -> IO ()
 -- client handlers will be discarded. If you have mutable state you want
 -- to share among multiple handlers, you need to use some kind of mutable
 -- variables.
+--
+-- Since 1.1.2
 runGeneralTCPServerTLS :: MonadBaseControl IO m => TLSConfig -> (AppData -> Maybe CertificateChain -> m ()) -> m ()
 runGeneralTCPServerTLS config app = liftBaseWith $ \run ->
-  runTCPServerTLS config $ \ad cert -> void . run $ app ad cert
+  runTCPServerTLS config $ void . run . app
 
 -- | run a server un-crypted but also pass a call-back to trigger a StartTLS handshake
 -- on the underlying connection

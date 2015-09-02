@@ -722,15 +722,7 @@ src $$ sink = do
     return res
 {-# INLINE [1] ($$) #-}
 
--- | Left fuse, combining a source and a conduit together into a new source.
---
--- Both the @Source@ and @Conduit@ will be closed when the newly-created
--- @Source@ is closed.
---
--- Leftover data from the @Conduit@ will be discarded.
---
--- Note: Since version 1.0.18, this operator has been generalized to be
--- identical to @=$=@.
+-- | A synonym for '=$=' for backwards compatibility.
 --
 -- Since 0.4.0
 ($=) :: Monad m => Conduit a m b -> ConduitM b c m r -> ConduitM a c m r
@@ -738,15 +730,7 @@ src $$ sink = do
 {-# INLINE [0] ($=) #-}
 {-# RULES "conduit: $= is =$=" ($=) = (=$=) #-}
 
--- | Right fuse, combining a conduit and a sink together into a new sink.
---
--- Both the @Conduit@ and @Sink@ will be closed when the newly-created @Sink@
--- is closed.
---
--- Leftover data returned from the @Sink@ will be discarded.
---
--- Note: Since version 1.0.18, this operator has been generalized to be
--- identical to @=$=@.
+-- | A synonym for '=$=' for backwards compatibility.
 --
 -- Since 0.4.0
 (=$) :: Monad m => Conduit a m b -> ConduitM b c m r -> ConduitM a c m r
@@ -787,7 +771,8 @@ ConduitM left0 =$= ConduitM right0 = ConduitM $ \rest ->
 {-# INLINE [1] (=$=) #-}
 
 -- | Wait for a single input value from upstream. If no data is available,
--- returns @Nothing@.
+-- returns @Nothing@. Once @await@ returns @Nothing@, subsequent calls will
+-- also return @Nothing@.
 --
 -- Since 0.5.0
 await :: Monad m => Consumer i m (Maybe i)
@@ -1062,6 +1047,12 @@ sequenceSources = getZipSource . sequenceA . fmap ZipSource
 -- Note that the standard 'Applicative' instance for conduits works
 -- differently. It feeds one sink with input until it finishes, then switches
 -- to another, etc., and at the end combines their results.
+--
+-- This newtype is in fact a type constrained version of 'ZipConduit', and has
+-- the same behavior. It's presented as a separate type since (1) it
+-- historically predates @ZipConduit@, and (2) the type constraining can make
+-- your code clearer (and thereby make your error messages more easily
+-- understood).
 --
 -- Since 1.0.13
 newtype ZipSink i m r = ZipSink { getZipSink :: Sink i m r }

@@ -17,6 +17,7 @@ module Data.Conduit.Binary
     , sourceIOHandle
     , sourceFileRange
     , sourceHandleRange
+    , sourceHandleRangeWithBuffer
       -- ** Sinks
     , sinkFile
     , sinkHandle
@@ -181,7 +182,21 @@ sourceHandleRange :: MonadIO m
                   -> Maybe Integer -- ^ Offset
                   -> Maybe Integer -- ^ Maximum count
                   -> Producer m S.ByteString
-sourceHandleRange handle offset count = do
+sourceHandleRange handle offset count =
+  sourceHandleRangeWithBuffer handle offset count defaultChunkSize
+
+-- | Stream the contents of a handle as binary data, starting from a certain
+-- offset and only consuming up to a certain number of bytes. This function
+-- consumes chunks as specified by the buffer size.
+--
+-- Since 1.1.8
+sourceHandleRangeWithBuffer :: MonadIO m
+                  => IO.Handle
+                  -> Maybe Integer -- ^ Offset
+                  -> Maybe Integer -- ^ Maximum count
+                  -> Int -- ^ Buffer size
+                  -> Producer m S.ByteString
+sourceHandleRangeWithBuffer handle offset count buffer = do
     case offset of
         Nothing -> return ()
         Just off -> liftIO $ IO.hSeek handle IO.AbsoluteSeek off
@@ -190,7 +205,7 @@ sourceHandleRange handle offset count = do
         Just c -> pullLimited (fromInteger c)
   where
     pullUnlimited = do
-        bs <- liftIO $ S.hGetSome handle 4096
+        bs <- liftIO $ S.hGetSome handle buffer
         if S.null bs
             then return ()
             else do
@@ -198,7 +213,7 @@ sourceHandleRange handle offset count = do
                 pullUnlimited
 
     pullLimited c = do
-        bs <- liftIO $ S.hGetSome handle (min c 4096)
+        bs <- liftIO $ S.hGetSome handle (min c buffer)
         let c' = c - S.length bs
         assert (c' >= 0) $
             if S.null bs
@@ -345,20 +360,18 @@ drop n0 = go n0
 -- Since 0.3.0
 lines :: Monad m => Conduit S.ByteString m S.ByteString
 lines =
-    loop id
+    loop []
   where
-    loop front = await >>= maybe (finish front) (go front)
+    loop acc = await >>= maybe (finish acc) (go acc)
 
-    finish front =
-        let final = front S.empty
+    finish acc =
+        let final = S.concat $ reverse acc
          in unless (S.null final) (yield final)
 
-    go sofar more =
+    go acc more =
         case S.uncons second of
-            Just (_, second') -> yield (sofar first) >> go id second'
-            Nothing ->
-                let rest = sofar more
-                 in loop $ S.append rest
+            Just (_, second') -> yield (S.concat $ reverse $ first:acc) >> go [] second'
+            Nothing -> loop $ more:acc
       where
         (first, second) = S.breakByte 10 more
 
