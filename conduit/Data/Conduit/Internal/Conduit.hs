@@ -1,4 +1,5 @@
 {-# OPTIONS_HADDOCK not-home #-}
+{-# LANGUAGE DeriveFunctor #-}
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE CPP #-}
@@ -6,8 +7,7 @@
 {-# LANGUAGE UndecidableInstances #-}
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE TupleSections #-}
-{-# LANGUAGE GeneralizedNewtypeDeriving #-}
-{-# LANGUAGE ImpredicativeTypes #-}
+{-# LANGUAGE Trustworthy #-}
 module Data.Conduit.Internal.Conduit
     ( -- ** Types
       ConduitM (..)
@@ -74,7 +74,9 @@ module Data.Conduit.Internal.Conduit
     , zipSources
     , zipSourcesApp
     , zipConduitApp
+    , mergeSource
     , passthroughSink
+    , sourceToList
     , fuseBoth
     , fuseBothMaybe
     , fuseUpstream
@@ -123,13 +125,13 @@ instance Functor (ConduitM i o m) where
     fmap f (ConduitM c) = ConduitM $ \rest -> c (rest . f)
 
 instance Applicative (ConduitM i o m) where
-    pure = return
+    pure x = ConduitM ($ x)
     {-# INLINE pure #-}
     (<*>) = ap
     {-# INLINE (<*>) #-}
 
 instance Monad (ConduitM i o m) where
-    return x = ConduitM ($ x)
+    return = pure
     ConduitM f >>= g = ConduitM $ \h -> f $ \a -> unConduitM (g a) h
 
 instance MonadThrow m => MonadThrow (ConduitM i o m) where
@@ -417,7 +419,7 @@ toConsumer (ConduitM c0) = ConduitM $ \rest -> let
 -- example, if an exception is thrown in a @Source@ feeding to a @Sink@, and
 -- the @Sink@ uses @catchC@, the exception will /not/ be caught.
 --
--- Due to this behavior (as well as lack of async exception handling), you
+-- Due to this behavior (as well as lack of async exception safety), you
 -- should not try to implement combinators such as @onException@ in terms of this
 -- primitive function.
 --
@@ -538,6 +540,8 @@ zipConduitApp
     -> ConduitM i o m y
 zipConduitApp (ConduitM left0) (ConduitM right0) = ConduitM $ \rest -> let
     go _ _ (Done f) (Done x) = rest (f x)
+    go finalX finalY (PipeM mx) y = PipeM (flip (go finalX finalY) y `liftM` mx)
+    go finalX finalY x (PipeM my) = PipeM (go finalX finalY x `liftM` my)
     go _ finalY (HaveOutput x finalX o) y = HaveOutput
         (go finalX finalY x y)
         (finalX >> finalY)
@@ -548,8 +552,6 @@ zipConduitApp (ConduitM left0) (ConduitM right0) = ConduitM $ \rest -> let
         o
     go _ _ (Leftover _ i) _ = absurd i
     go _ _ _ (Leftover _ i) = absurd i
-    go finalX finalY (PipeM mx) y = PipeM (flip (go finalX finalY) y `liftM` mx)
-    go finalX finalY x (PipeM my) = PipeM (go finalX finalY x `liftM` my)
     go finalX finalY (NeedInput px cx) (NeedInput py cy) = NeedInput
         (\i -> go finalX finalY (px i) (py i))
         (\u -> go finalX finalY (cx u) (cy u))
@@ -664,6 +666,25 @@ unwrapResumableConduit (ResumableConduit src final) = do
 newResumableConduit :: Monad m => Conduit i m o -> ResumableConduit i m o
 newResumableConduit (ConduitM c) = ResumableConduit (c Done) (return ())
 
+
+-- | Merge a @Source@ into a @Conduit@.
+-- The new conduit will stop processing once either source or upstream have been exhausted.
+mergeSource
+  :: Monad m
+  => Source m i
+  -> Conduit a m (i, a)
+mergeSource = loop . newResumableSource
+  where
+    loop :: Monad m => ResumableSource m i -> Conduit a m (i, a)
+    loop src0 = await >>= maybe (lift $ closeResumableSource src0) go
+      where
+        go a = do
+          (src1, mi) <- lift $ src0 $$++ await
+          case mi of
+            Nothing -> lift $ closeResumableSource src1
+            Just i  -> yield (i, a) >> loop src1
+
+
 -- | Turn a @Sink@ into a @Conduit@ in the following way:
 --
 -- * All input passed to the @Sink@ is yielded downstream.
@@ -699,6 +720,27 @@ passthroughSink (ConduitM sink0) final = ConduitM $ \rest -> let
                 CI.yield x
                 go [] (next x)
     in go [] (sink0 Done)
+
+-- | Convert a @Source@ into a list. The basic functionality can be explained as:
+--
+-- > sourceToList src = src $$ Data.Conduit.List.consume
+--
+-- However, @sourceToList@ is able to produce its results lazily, which cannot
+-- be done when running a conduit pipeline in general. Unlike the
+-- @Data.Conduit.Lazy@ module (in conduit-extra), this function performs no
+-- unsafe I\/O operations, and therefore can only be as lazily as the
+-- underlying monad.
+--
+-- Since 1.2.6
+sourceToList :: Monad m => Source m a -> m [a]
+sourceToList =
+    go . flip unConduitM Done
+  where
+    go (Done _) = return []
+    go (HaveOutput src _ x) = liftM (x:) (go src)
+    go (PipeM msrc) = msrc >>= go
+    go (NeedInput _ c) = go (c ())
+    go (Leftover p _) = go p
 
 -- Define fixity of all our operators
 infixr 0 $$
@@ -800,6 +842,9 @@ yield :: Monad m
 yield o = yieldOr o (return ())
 {-# INLINE yield #-}
 
+-- | Send a monadic value downstream for the next component to consume.
+--
+-- @since 1.2.7
 yieldM :: Monad m => m o -> ConduitM i o m ()
 yieldM mo = lift mo >>= yield
 {-# INLINE yieldM #-}
@@ -812,7 +857,7 @@ yieldM mo = lift mo >>= yield
 -- /Note/: it is highly encouraged to only return leftover values from input
 -- already consumed from upstream.
 --
--- Since 0.5.0
+-- @since 0.5.0
 leftover :: i -> ConduitM i o m ()
 leftover i = ConduitM $ \rest -> Leftover (rest ()) i
 {-# INLINE leftover #-}
@@ -824,8 +869,8 @@ runConduit :: Monad m => ConduitM () Void m r -> m r
 runConduit (ConduitM p) = runPipe $ injectLeftovers $ p Done
 {-# INLINE [0] runConduit #-}
 
--- | Perform some allocation and run an inner component. Two guarantees are
--- given about resource finalization:
+-- | Bracket a conduit computation between allocation and release of a
+-- resource. Two guarantees are given about resource finalization:
 --
 -- 1. It will be /prompt/. The finalization will be run as early as possible.
 --
@@ -834,10 +879,15 @@ runConduit (ConduitM p) = runPipe $ injectLeftovers $ p Done
 --
 -- Since 0.5.0
 bracketP :: MonadResource m
+
          => IO a
+            -- ^ computation to run first (\"acquire resource\")
          -> (a -> IO ())
+            -- ^ computation to run last (\"release resource\")
          -> (a -> ConduitM i o m r)
+            -- ^ computation to run in-between
          -> ConduitM i o m r
+            -- returns the value from the in-between computation
 bracketP alloc free inside = ConduitM $ \rest -> PipeM $ do
     (key, seed) <- allocate alloc free
     return $ unConduitM (addCleanup (const $ release key) (inside seed)) rest

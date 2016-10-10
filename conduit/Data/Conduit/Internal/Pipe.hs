@@ -6,8 +6,7 @@
 {-# LANGUAGE UndecidableInstances #-}
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE TupleSections #-}
-{-# LANGUAGE GeneralizedNewtypeDeriving #-}
-{-# LANGUAGE ImpredicativeTypes #-}
+{-# LANGUAGE Trustworthy #-}
 module Data.Conduit.Internal.Pipe
     ( -- ** Types
       Pipe (..)
@@ -108,13 +107,13 @@ instance Monad m => Functor (Pipe l i o u m) where
     {-# INLINE fmap #-}
 
 instance Monad m => Applicative (Pipe l i o u m) where
-    pure = return
+    pure = Done
     {-# INLINE pure #-}
     (<*>) = ap
     {-# INLINE (<*>) #-}
 
 instance Monad m => Monad (Pipe l i o u m) where
-    return = Done
+    return = pure
     {-# INLINE return #-}
 
     HaveOutput p c o >>= fp = HaveOutput (p >>= fp)            c          o
@@ -288,8 +287,8 @@ leftover = Leftover (Done ())
 {-# INLINE [1] leftover #-}
 {-# RULES "conduit: leftover l >> p" forall l (p :: Pipe l i o u m r). leftover l >> p = Leftover p l #-}
 
--- | Perform some allocation and run an inner @Pipe@. Two guarantees are given
--- about resource finalization:
+-- | Bracket a pipe computation between allocation and release of a
+-- resource. Two guarantees are given about resource finalization:
 --
 -- 1. It will be /prompt/. The finalization will be run as early as possible.
 --
@@ -299,9 +298,13 @@ leftover = Leftover (Done ())
 -- Since 0.5.0
 bracketP :: MonadResource m
          => IO a
+            -- ^ computation to run first (\"acquire resource\")
          -> (a -> IO ())
+            -- ^ computation to run last (\"release resource\")
          -> (a -> Pipe l i o u m r)
+            -- ^ computation to run in-between
          -> Pipe l i o u m r
+            -- returns the value from the in-between computation
 bracketP alloc free inside =
     PipeM start
   where

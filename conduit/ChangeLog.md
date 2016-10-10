@@ -1,3 +1,45 @@
+## 1.2.8
+
+* Implement
+  [the reskinning idea](http://www.snoyman.com/blog/2016/09/proposed-conduit-reskin):
+    * `.|`
+    * `runConduitPure`
+    * `runConduitRes`
+
+## 1.2.7
+
+* Expose yieldM for ConduitM [#270](https://github.com/snoyberg/conduit/pull/270)
+
+## 1.2.6.6
+
+* Fix test suite compilation on older GHCs
+
+## 1.2.6.5
+
+* In zipConduitApp, left bias not respected mixing monadic and non-monadic conduits [#263](https://github.com/snoyberg/conduit/pull/263)
+
+## 1.2.6.4
+
+* Fix benchmark by adding a type signature
+
+## 1.2.6.3
+
+* Doc updates
+
+## 1.2.6.2
+
+* resourcet cannot be built with GHC 8 [#242](https://github.com/snoyberg/conduit/issues/242)
+* Remove upper bound on transformers [#253](https://github.com/snoyberg/conduit/issues/253)
+
+## 1.2.6
+
+* `sourceToList`
+* Canonicalise Monad instances [#237](https://github.com/snoyberg/conduit/pull/237)
+
+## 1.2.5
+
+* mapAccum and mapAccumM should be strict in their state [#218](https://github.com/snoyberg/conduit/issues/218)
+
 ## 1.2.4.1
 
 * Some documentation improvements

@@ -1,4 +1,5 @@
 {-# LANGUAGE CPP #-}
+{-# LANGUAGE OverloadedStrings #-}
 module Data.Conduit.ProcessSpec (spec, main) where
 
 import Test.Hspec
@@ -9,6 +10,7 @@ import Data.Conduit.Process
 import Control.Concurrent.Async (concurrently)
 import qualified Data.ByteString.Lazy as L
 import qualified Data.ByteString as S
+import qualified Data.ByteString.Char8 as S8
 import System.Exit
 import Control.Concurrent (threadDelay)
 
@@ -45,6 +47,36 @@ spec = describe "Data.Conduit.Process" $ do
                 `shouldReturn` (ExitFailure 11, ())
         (sourceCmdWithConsumer "exit 12" CL.sinkNull)
                 `shouldReturn` (ExitFailure 12, ())
+        (sourceCmdWithStreams "exit 0" CL.sourceNull CL.sinkNull CL.sinkNull)
+                `shouldReturn` (ExitSuccess, (), ())
+        (sourceCmdWithStreams "exit 11" CL.sourceNull CL.sinkNull CL.sinkNull)
+                `shouldReturn` (ExitFailure 11, (), ())
+        (sourceCmdWithStreams "exit 12" CL.sourceNull CL.sinkNull CL.sinkNull)
+                `shouldReturn` (ExitFailure 12, (), ())
+
+    it "consumes stdout" $ do
+        let mystr = "this is a test string" :: String
+        sourceCmdWithStreams ("bash -c \"echo -n " ++ mystr ++ "\"")
+                             CL.sourceNull
+                             CL.consume -- stdout
+                             CL.consume -- stderr
+                `shouldReturn` (ExitSuccess, [S8.pack mystr], [])
+
+    it "consumes stderr" $ do
+        let mystr = "this is a test string" :: String
+        sourceCmdWithStreams ("bash -c \">&2 echo -n " ++ mystr ++ "\"")
+                             CL.sourceNull
+                             CL.consume -- stdout
+                             CL.consume -- stderr
+                `shouldReturn` (ExitSuccess, [], [S8.pack mystr])
+
+    it "feeds stdin" $ do
+        let mystr = "this is a test string" :: S.ByteString
+        sourceCmdWithStreams "cat"
+                             (mapM_ yield . L.toChunks $ L.fromStrict mystr)
+                             CL.consume -- stdout
+                             CL.consume -- stderr
+                `shouldReturn` (ExitSuccess, [mystr], [])
 #endif
     it "blocking vs non-blocking" $ do
         (ClosedStream, ClosedStream, ClosedStream, cph) <- streamingProcess (shell "sleep 1")
@@ -64,7 +96,7 @@ spec = describe "Data.Conduit.Process" $ do
                         threadDelay 500000
                         loop (pred i)
                     Just _ -> mec2 `shouldBe` Just ExitSuccess
-        loop 5
+        loop (5 :: Int)
 
         ec <- waitForStreamingProcess cph
         ec `shouldBe` ExitSuccess

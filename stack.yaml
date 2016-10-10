@@ -1,0 +1,9 @@
+resolver: lts-5.2
+packages:
+- cereal-conduit
+- conduit
+- conduit-extra
+- network-conduit-tls
+- resourcet
+extra-deps:
+- streaming-commons-0.1.16

@@ -7,6 +7,13 @@
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE UndecidableInstances #-}
 {-# LANGUAGE RankNTypes #-}
+-- Can only mark as Safe when using a newer GHC, otherwise we get build
+-- failures due to the manual Typeable instance below.
+#if __GLASGOW_HASKELL__ >= 707
+{-# LANGUAGE Safe #-}
+#else
+{-# LANGUAGE Trustworthy #-}
+#endif
 
 module Control.Monad.Trans.Resource.Internal(
     InvalidAccess(..)
@@ -25,6 +32,7 @@ module Control.Monad.Trans.Resource.Internal(
 import Control.Exception (throw,Exception,SomeException)
 import Control.Applicative (Applicative (..), Alternative(..))
 import Control.Monad (MonadPlus(..))
+import Control.Monad.Fix (MonadFix(..))
 import Control.Monad.Trans.Control
     ( MonadTransControl (..), MonadBaseControl (..) )
 import Control.Monad.Base (MonadBase, liftBase)
@@ -55,7 +63,6 @@ import Control.Monad.IO.Class (MonadIO (..))
 import Control.Monad (liftM)
 #endif
 import qualified Control.Exception as E
-import Control.Monad.ST (ST)
 import Control.Monad.Catch (MonadThrow (..), MonadCatch (..)
 #if MIN_VERSION_exceptions(0,6,0)
     , MonadMask (..)
@@ -70,24 +77,10 @@ import Data.Word(Word)
 import Prelude hiding (catch)
 import Data.Acquire.Internal (ReleaseType (..))
 
-#if __GLASGOW_HASKELL__ >= 704
-import Control.Monad.ST.Unsafe (unsafeIOToST)
-#else
-import Control.Monad.ST (unsafeIOToST)
-#endif
-
-#if __GLASGOW_HASKELL__ >= 704
-import qualified Control.Monad.ST.Lazy.Unsafe as LazyUnsafe
-#else
-import qualified Control.Monad.ST.Lazy as LazyUnsafe
-#endif
-
-import qualified Control.Monad.ST.Lazy as Lazy
-
 import Control.Monad.Morph
 
 -- | A @Monad@ which allows for safe resource allocation. In theory, any monad
--- transformer stack included a @ResourceT@ can be an instance of
+-- transformer stack which includes a @ResourceT@ can be an instance of
 -- @MonadResource@.
 --
 -- Note: @runResourceT@ has a requirement for a @MonadBaseControl IO m@ monad,
@@ -247,11 +240,17 @@ instance MonadPlus m => MonadPlus (ResourceT m) where
     (ResourceT mf) `mplus` (ResourceT ma) = ResourceT $ \r -> mf r `mplus` ma r
 
 instance Monad m => Monad (ResourceT m) where
+#if !MIN_VERSION_base(4,8,0)
     return = ResourceT . const . return
+#endif
     ResourceT ma >>= f = ResourceT $ \r -> do
         a <- ma r
         let ResourceT f' = f a
         f' r
+
+-- | @since 1.1.8
+instance MonadFix m => MonadFix (ResourceT m) where
+  mfix f = ResourceT $ \r -> mfix $ \a -> unResourceT (f a) r
 
 instance MonadTrans ResourceT where
     lift = ResourceT . const
