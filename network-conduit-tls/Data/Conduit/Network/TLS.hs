@@ -273,10 +273,8 @@ tlsAppData ctx addr mlocal = AppData
 -- taken from stunnel example in tls-extra
 ciphers :: [TLS.Cipher]
 ciphers =
-    [ TLSExtra.cipher_AES128_SHA1
-    , TLSExtra.cipher_AES256_SHA1
-    , TLSExtra.cipher_RC4_128_MD5
-    , TLSExtra.cipher_RC4_128_SHA1
+    [ TLSExtra.cipher_AES128_SHA256
+    , TLSExtra.cipher_AES256_SHA256
     ]
 
 readCreds :: TlsCertData -> IO TLS.Credentials
