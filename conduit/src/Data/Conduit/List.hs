@@ -2,7 +2,10 @@
 {-# LANGUAGE BangPatterns #-}
 {-# LANGUAGE CPP #-}
 {-# LANGUAGE Trustworthy #-}
--- | Higher-level functions to interact with the elements of a stream. Most of
+-- | /NOTE/ It is recommended to start using "Data.Conduit.Combinators" instead
+-- of this module.
+--
+-- Higher-level functions to interact with the elements of a stream. Most of
 -- these are based on list functions.
 --
 -- For many purposes, it's recommended to use the conduit-combinators library,
@@ -19,7 +22,9 @@ module Data.Conduit.List
       sourceList
     , sourceNull
     , unfold
+    , unfoldEither
     , unfoldM
+    , unfoldEitherM
     , enumFromTo
     , iterate
     , replicate
@@ -50,6 +55,7 @@ module Data.Conduit.List
     , scanl
     , scan
     , mapAccum
+    , chunksOf
     , groupBy
     , groupOn1
     , isolate
@@ -72,6 +78,7 @@ import qualified Prelude
 import Prelude
     ( ($), return, (==), (-), Int
     , (.), id, Maybe (..), Monad
+    , Either (..)
     , Bool (..)
     , (>>)
     , (>>=)
@@ -80,6 +87,10 @@ import Prelude
     , Enum, Eq
     , maybe
     , (<=)
+    , (>)
+    , error
+    , (++)
+    , show
     )
 import Data.Monoid (Monoid, mempty, mappend)
 import qualified Data.Foldable as F
@@ -101,7 +112,7 @@ import Control.Monad.Trans.Class (lift)
 unfold, unfoldC :: Monad m
                 => (b -> Maybe (a, b))
                 -> b
-                -> Producer m a
+                -> ConduitT i a m ()
 unfoldC f =
     go
   where
@@ -112,6 +123,25 @@ unfoldC f =
 {-# INLINE unfoldC #-}
 STREAMING(unfold, unfoldC, unfoldS, f x)
 
+-- | Generate a source from a seed value with a return value.
+--
+-- Subject to fusion
+--
+-- @since 1.2.11
+unfoldEither, unfoldEitherC :: Monad m
+                            => (b -> Either r (a, b))
+                            -> b
+                            -> ConduitT i a m r
+unfoldEitherC f =
+    go
+  where
+    go seed =
+        case f seed of
+            Right (a, seed') -> yield a >> go seed'
+            Left r -> return r
+{-# INLINE unfoldEitherC #-}
+STREAMING(unfoldEither, unfoldEitherC, unfoldEitherS, f x)
+
 -- | A monadic unfold.
 --
 -- Subject to fusion
@@ -120,7 +150,7 @@ STREAMING(unfold, unfoldC, unfoldS, f x)
 unfoldM, unfoldMC :: Monad m
                   => (b -> m (Maybe (a, b)))
                   -> b
-                  -> Producer m a
+                  -> ConduitT i a m ()
 unfoldMC f =
     go
   where
@@ -131,10 +161,29 @@ unfoldMC f =
             Nothing -> return ()
 STREAMING(unfoldM, unfoldMC, unfoldMS, f seed)
 
+-- | A monadic unfoldEither.
+--
+-- Subject to fusion
+--
+-- @since 1.2.11
+unfoldEitherM, unfoldEitherMC :: Monad m
+                              => (b -> m (Either r (a, b)))
+                              -> b
+                              -> ConduitT i a m r
+unfoldEitherMC f =
+    go
+  where
+    go seed = do
+        mres <- lift $ f seed
+        case mres of
+            Right (a, seed') -> yield a >> go seed'
+            Left r -> return r
+STREAMING(unfoldEitherM, unfoldEitherMC, unfoldEitherMS, f seed)
+
 -- | Yield the values from the list.
 --
 -- Subject to fusion
-sourceList, sourceListC :: Monad m => [a] -> Producer m a
+sourceList, sourceListC :: Monad m => [a] -> ConduitT i a m ()
 sourceListC = Prelude.mapM_ yield
 {-# INLINE sourceListC #-}
 STREAMING(sourceList, sourceListC, sourceListS, xs)
@@ -151,7 +200,7 @@ STREAMING(sourceList, sourceListC, sourceListS, xs)
 enumFromTo, enumFromToC :: (Enum a, Prelude.Ord a, Monad m)
                         => a
                         -> a
-                        -> Producer m a
+                        -> ConduitT i a m ()
 enumFromToC x0 y =
     loop x0
   where
@@ -165,7 +214,7 @@ STREAMING(enumFromTo, enumFromToC, enumFromToS, x0 y)
 --
 -- Subject to fusion
 --
-iterate, iterateC :: Monad m => (a -> a) -> a -> Producer m a
+iterate, iterateC :: Monad m => (a -> a) -> a -> ConduitT i a m ()
 iterateC f =
     go
   where
@@ -178,7 +227,7 @@ STREAMING(iterate, iterateC, iterateS, f a)
 -- Subject to fusion
 --
 -- Since 1.2.0
-replicate, replicateC :: Monad m => Int -> a -> Producer m a
+replicate, replicateC :: Monad m => Int -> a -> ConduitT i a m ()
 replicateC cnt0 a =
     loop cnt0
   where
@@ -193,7 +242,7 @@ STREAMING(replicate, replicateC, replicateS, cnt0 a)
 -- Subject to fusion
 --
 -- Since 1.2.0
-replicateM, replicateMC :: Monad m => Int -> m a -> Producer m a
+replicateM, replicateMC :: Monad m => Int -> m a -> ConduitT i a m ()
 replicateMC cnt0 ma =
     loop cnt0
   where
@@ -211,7 +260,7 @@ STREAMING(replicateM, replicateMC, replicateMS, cnt0 ma)
 fold, foldC :: Monad m
             => (b -> a -> b)
             -> b
-            -> Consumer a m b
+            -> ConduitT a o m b
 foldC f =
     loop
   where
@@ -227,7 +276,7 @@ STREAMING(fold, foldC, foldS, f accum)
 foldM, foldMC :: Monad m
               => (b -> a -> m b)
               -> b
-              -> Consumer a m b
+              -> ConduitT a o m b
 foldMC f =
     loop
   where
@@ -243,26 +292,26 @@ STREAMING(foldM, foldMC, foldMS, f accum)
 -----------------------------------------------------------------
 -- These are for cases where- for whatever reason- stream fusion cannot be
 -- applied.
-connectFold :: Monad m => Source m a -> (b -> a -> b) -> b -> m b
-connectFold (CI.ConduitM src0) f =
+connectFold :: Monad m => ConduitT () a m () -> (b -> a -> b) -> b -> m b
+connectFold (CI.ConduitT src0) f =
     go (src0 CI.Done)
   where
     go (CI.Done ()) b = return b
-    go (CI.HaveOutput src _ a) b = go src Prelude.$! f b a
+    go (CI.HaveOutput src a) b = go src Prelude.$! f b a
     go (CI.NeedInput _ c) b = go (c ()) b
     go (CI.Leftover src ()) b = go src b
     go (CI.PipeM msrc) b = do
         src <- msrc
         go src b
 {-# INLINE connectFold #-}
-{-# RULES "conduit: $$ fold" forall src f b. src $$ fold f b = connectFold src f b #-}
+{-# RULES "conduit: $$ fold" forall src f b. runConduit (src .| fold f b) = connectFold src f b #-}
 
-connectFoldM :: Monad m => Source m a -> (b -> a -> m b) -> b -> m b
-connectFoldM (CI.ConduitM src0) f =
+connectFoldM :: Monad m => ConduitT () a m () -> (b -> a -> m b) -> b -> m b
+connectFoldM (CI.ConduitT src0) f =
     go (src0 CI.Done)
   where
     go (CI.Done ()) b = return b
-    go (CI.HaveOutput src _ a) b = do
+    go (CI.HaveOutput src a) b = do
         !b' <- f b a
         go src b'
     go (CI.NeedInput _ c) b = go (c ()) b
@@ -271,7 +320,7 @@ connectFoldM (CI.ConduitM src0) f =
         src <- msrc
         go src b
 {-# INLINE connectFoldM #-}
-{-# RULES "conduit: $$ foldM" forall src f b. src $$ foldM f b = connectFoldM src f b #-}
+{-# RULES "conduit: $$ foldM" forall src f b. runConduit (src .| foldM f b) = connectFoldM src f b #-}
 -----------------------------------------------------------------
 
 -- | A monoidal strict left fold.
@@ -281,7 +330,7 @@ connectFoldM (CI.ConduitM src0) f =
 -- Since 0.5.3
 foldMap :: (Monad m, Monoid b)
         => (a -> b)
-        -> Consumer a m b
+        -> ConduitT a o m b
 INLINE_RULE(foldMap, f, let combiner accum = mappend accum . f in fold combiner mempty)
 
 -- | A monoidal strict left fold in a Monad.
@@ -289,7 +338,7 @@ INLINE_RULE(foldMap, f, let combiner accum = mappend accum . f in fold combiner 
 -- Since 1.0.8
 foldMapM :: (Monad m, Monoid b)
         => (a -> m b)
-        -> Consumer a m b
+        -> ConduitT a o m b
 INLINE_RULE(foldMapM, f, let combiner accum = liftM (mappend accum) . f in foldM combiner mempty)
 
 -- | Apply the action to all values in the stream.
@@ -299,22 +348,22 @@ INLINE_RULE(foldMapM, f, let combiner accum = liftM (mappend accum) . f in foldM
 -- Since 0.3.0
 mapM_, mapM_C :: Monad m
               => (a -> m ())
-              -> Consumer a m ()
+              -> ConduitT a o m ()
 mapM_C f = awaitForever $ lift . f
 {-# INLINE mapM_C #-}
 STREAMING(mapM_, mapM_C, mapM_S, f)
 
-srcMapM_ :: Monad m => Source m a -> (a -> m ()) -> m ()
-srcMapM_ (CI.ConduitM src) f =
+srcMapM_ :: Monad m => ConduitT () a m () -> (a -> m ()) -> m ()
+srcMapM_ (CI.ConduitT src) f =
     go (src CI.Done)
   where
     go (CI.Done ()) = return ()
     go (CI.PipeM mp) = mp >>= go
     go (CI.Leftover p ()) = go p
-    go (CI.HaveOutput p _ o) = f o >> go p
+    go (CI.HaveOutput p o) = f o >> go p
     go (CI.NeedInput _ c) = go (c ())
 {-# INLINE srcMapM_ #-}
-{-# RULES "conduit: connect to mapM_" [2] forall f src. src $$ mapM_ f = srcMapM_ src f #-}
+{-# RULES "conduit: connect to mapM_" [2] forall f src. runConduit (src .| mapM_ f) = srcMapM_ src f #-}
 
 -- | Ignore a certain number of values in the stream. This function is
 -- semantically equivalent to:
@@ -329,7 +378,7 @@ srcMapM_ (CI.ConduitM src) f =
 -- Since 0.3.0
 drop, dropC :: Monad m
             => Int
-            -> Consumer a m ()
+            -> ConduitT a o m ()
 dropC =
     loop
   where
@@ -349,7 +398,7 @@ STREAMING(drop, dropC, dropS, i)
 -- Since 0.3.0
 take, takeC :: Monad m
             => Int
-            -> Consumer a m [a]
+            -> ConduitT a o m [a]
 takeC =
     loop id
   where
@@ -365,7 +414,7 @@ STREAMING(take, takeC, takeS, i)
 -- Subject to fusion
 --
 -- Since 0.3.0
-head, headC :: Monad m => Consumer a m (Maybe a)
+head, headC :: Monad m => ConduitT a o m (Maybe a)
 headC = await
 {-# INLINE headC #-}
 STREAMING0(head, headC, headS)
@@ -374,7 +423,7 @@ STREAMING0(head, headC, headS)
 -- change the state of the stream.
 --
 -- Since 0.3.0
-peek :: Monad m => Consumer a m (Maybe a)
+peek :: Monad m => ConduitT a o m (Maybe a)
 peek = await >>= maybe (return Nothing) (\x -> leftover x >> return (Just x))
 
 -- | Apply a transformation to all values in a stream.
@@ -382,14 +431,14 @@ peek = await >>= maybe (return Nothing) (\x -> leftover x >> return (Just x))
 -- Subject to fusion
 --
 -- Since 0.3.0
-map, mapC :: Monad m => (a -> b) -> Conduit a m b
+map, mapC :: Monad m => (a -> b) -> ConduitT a b m ()
 mapC f = awaitForever $ yield . f
 {-# INLINE mapC #-}
 STREAMING(map, mapC, mapS, f)
 
 -- Since a Source never has any leftovers, fusion rules on it are safe.
 {-
-{-# RULES "conduit: source/map fusion =$=" forall f src. src =$= map f = mapFuseRight src f #-}
+{-# RULES "conduit: source/map fusion .|" forall f src. src .| map f = mapFuseRight src f #-}
 
 mapFuseRight :: Monad m => Source m a -> (a -> b) -> Source m b
 mapFuseRight src f = CIC.mapOutput f src
@@ -411,8 +460,8 @@ differences based on leftovers.
 {-# RULES "conduit: map-to-mapInput pipe" forall f sink. pipe (map f) sink = mapInput f (Prelude.const Prelude.Nothing) sink #-}
 {-# RULES "conduit: map-to-mapInput >+>" forall f sink. map f >+> sink = mapInput f (Prelude.const Prelude.Nothing) sink #-}
 
-{-# RULES "conduit: map-to-mapOutput =$=" forall f con. con =$= map f = mapOutput f con #-}
-{-# RULES "conduit: map-to-mapInput =$=" forall f con. map f =$= con = mapInput f (Prelude.const Prelude.Nothing) con #-}
+{-# RULES "conduit: map-to-mapOutput .|" forall f con. con .| map f = mapOutput f con #-}
+{-# RULES "conduit: map-to-mapInput .|" forall f con. map f .| con = mapInput f (Prelude.const Prelude.Nothing) con #-}
 
 {-# INLINE [1] map #-}
 
@@ -426,7 +475,7 @@ differences based on leftovers.
 -- Subject to fusion
 --
 -- Since 0.3.0
-mapM, mapMC :: Monad m => (a -> m b) -> Conduit a m b
+mapM, mapMC :: Monad m => (a -> m b) -> ConduitT a b m ()
 mapMC f = awaitForever $ \a -> lift (f a) >>= yield
 {-# INLINE mapMC #-}
 STREAMING(mapM, mapMC, mapMS, f)
@@ -441,7 +490,7 @@ STREAMING(mapM, mapMC, mapMS, f)
 -- Subject to fusion
 --
 -- Since 0.5.6
-iterM, iterMC :: Monad m => (a -> m ()) -> Conduit a m a
+iterM, iterMC :: Monad m => (a -> m ()) -> ConduitT a a m ()
 iterMC f = awaitForever $ \a -> lift (f a) >> yield a
 {-# INLINE iterMC #-}
 STREAMING(iterM, iterMC, iterMS, f)
@@ -452,7 +501,7 @@ STREAMING(iterM, iterMC, iterMS, f)
 -- Subject to fusion
 --
 -- Since 0.5.1
-mapMaybe, mapMaybeC :: Monad m => (a -> Maybe b) -> Conduit a m b
+mapMaybe, mapMaybeC :: Monad m => (a -> Maybe b) -> ConduitT a b m ()
 mapMaybeC f = awaitForever $ maybe (return ()) yield . f
 {-# INLINE mapMaybeC #-}
 STREAMING(mapMaybe, mapMaybeC, mapMaybeS, f)
@@ -463,7 +512,7 @@ STREAMING(mapMaybe, mapMaybeC, mapMaybeS, f)
 -- Subject to fusion
 --
 -- Since 0.5.1
-mapMaybeM, mapMaybeMC :: Monad m => (a -> m (Maybe b)) -> Conduit a m b
+mapMaybeM, mapMaybeMC :: Monad m => (a -> m (Maybe b)) -> ConduitT a b m ()
 mapMaybeMC f = awaitForever $ maybe (return ()) yield <=< lift . f
 {-# INLINE mapMaybeMC #-}
 STREAMING(mapMaybeM, mapMaybeMC, mapMaybeMS, f)
@@ -473,7 +522,7 @@ STREAMING(mapMaybeM, mapMaybeMC, mapMaybeMS, f)
 -- Subject to fusion
 --
 -- Since 0.5.1
-catMaybes, catMaybesC :: Monad m => Conduit (Maybe a) m a
+catMaybes, catMaybesC :: Monad m => ConduitT (Maybe a) a m ()
 catMaybesC = awaitForever $ maybe (return ()) yield
 {-# INLINE catMaybesC #-}
 STREAMING0(catMaybes, catMaybesC, catMaybesS)
@@ -484,7 +533,7 @@ STREAMING0(catMaybes, catMaybesC, catMaybesS)
 -- Subject to fusion
 --
 -- Since 1.0.6
-concat, concatC :: (Monad m, F.Foldable f) => Conduit (f a) m a
+concat, concatC :: (Monad m, F.Foldable f) => ConduitT (f a) a m ()
 concatC = awaitForever $ F.mapM_ yield
 {-# INLINE concatC #-}
 STREAMING0(concat, concatC, concatS)
@@ -495,7 +544,7 @@ STREAMING0(concat, concatC, concatS)
 -- Subject to fusion
 --
 -- Since 0.3.0
-concatMap, concatMapC :: Monad m => (a -> [b]) -> Conduit a m b
+concatMap, concatMapC :: Monad m => (a -> [b]) -> ConduitT a b m ()
 concatMapC f = awaitForever $ sourceList . f
 {-# INLINE concatMapC #-}
 STREAMING(concatMap, concatMapC, concatMapS, f)
@@ -506,7 +555,7 @@ STREAMING(concatMap, concatMapC, concatMapS, f)
 -- Subject to fusion
 --
 -- Since 0.3.0
-concatMapM, concatMapMC :: Monad m => (a -> m [b]) -> Conduit a m b
+concatMapM, concatMapMC :: Monad m => (a -> m [b]) -> ConduitT a b m ()
 concatMapMC f = awaitForever $ sourceList <=< lift . f
 {-# INLINE concatMapMC #-}
 STREAMING(concatMapM, concatMapMC, concatMapMS, f)
@@ -516,22 +565,22 @@ STREAMING(concatMapM, concatMapMC, concatMapMS, f)
 -- Subject to fusion
 --
 -- Since 0.3.0
-concatMapAccum, concatMapAccumC :: Monad m => (a -> accum -> (accum, [b])) -> accum -> Conduit a m b
-concatMapAccumC f x0 = void (mapAccum f x0) =$= concat
+concatMapAccum, concatMapAccumC :: Monad m => (a -> accum -> (accum, [b])) -> accum -> ConduitT a b m ()
+concatMapAccumC f x0 = void (mapAccum f x0) .| concat
 {-# INLINE concatMapAccumC #-}
 STREAMING(concatMapAccum, concatMapAccumC, concatMapAccumS, f x0)
 
 -- | Deprecated synonym for @mapAccum@
 --
 -- Since 1.0.6
-scanl :: Monad m => (a -> s -> (s, b)) -> s -> Conduit a m b
+scanl :: Monad m => (a -> s -> (s, b)) -> s -> ConduitT a b m ()
 scanl f s = void $ mapAccum f s
 {-# DEPRECATED scanl "Use mapAccum instead" #-}
 
 -- | Deprecated synonym for @mapAccumM@
 --
 -- Since 1.0.6
-scanlM :: Monad m => (a -> s -> m (s, b)) -> s -> Conduit a m b
+scanlM :: Monad m => (a -> s -> m (s, b)) -> s -> ConduitT a b m ()
 scanlM f s = void $ mapAccumM f s
 {-# DEPRECATED scanlM "Use mapAccumM instead" #-}
 
@@ -542,7 +591,7 @@ scanlM f s = void $ mapAccumM f s
 -- Subject to fusion
 --
 -- Since 1.1.1
-mapAccum, mapAccumC :: Monad m => (a -> s -> (s, b)) -> s -> ConduitM a b m s
+mapAccum, mapAccumC :: Monad m => (a -> s -> (s, b)) -> s -> ConduitT a b m s
 mapAccumC f =
     loop
   where
@@ -557,7 +606,7 @@ STREAMING(mapAccum, mapAccumC, mapAccumS, f s)
 -- Subject to fusion
 --
 -- Since 1.1.1
-mapAccumM, mapAccumMC :: Monad m => (a -> s -> m (s, b)) -> s -> ConduitM a b m s
+mapAccumM, mapAccumMC :: Monad m => (a -> s -> m (s, b)) -> s -> ConduitT a b m s
 mapAccumMC f =
     loop
   where
@@ -574,7 +623,7 @@ STREAMING(mapAccumM, mapAccumMC, mapAccumMS, f s)
 -- Subject to fusion
 --
 -- Since 1.1.1
-scan :: Monad m => (a -> b -> b) -> b -> ConduitM a b m b
+scan :: Monad m => (a -> b -> b) -> b -> ConduitT a b m b
 INLINE_RULE(scan, f, mapAccum (\a b -> let r = f a b in (r, r)))
 
 -- | Monadic @scanl@.
@@ -582,7 +631,7 @@ INLINE_RULE(scan, f, mapAccum (\a b -> let r = f a b in (r, r)))
 -- Subject to fusion
 --
 -- Since 1.1.1
-scanM :: Monad m => (a -> b -> m b) -> b -> ConduitM a b m b
+scanM :: Monad m => (a -> b -> m b) -> b -> ConduitT a b m b
 INLINE_RULE(scanM, f, mapAccumM (\a b -> f a b >>= \r -> return (r, r)))
 
 -- | 'concatMapM' with a strict accumulator.
@@ -590,8 +639,8 @@ INLINE_RULE(scanM, f, mapAccumM (\a b -> f a b >>= \r -> return (r, r)))
 -- Subject to fusion
 --
 -- Since 0.3.0
-concatMapAccumM, concatMapAccumMC :: Monad m => (a -> accum -> m (accum, [b])) -> accum -> Conduit a m b
-concatMapAccumMC f x0 = void (mapAccumM f x0) =$= concat
+concatMapAccumM, concatMapAccumMC :: Monad m => (a -> accum -> m (accum, [b])) -> accum -> ConduitT a b m ()
+concatMapAccumMC f x0 = void (mapAccumM f x0) .| concat
 {-# INLINE concatMapAccumMC #-}
 STREAMING(concatMapAccumM, concatMapAccumMC, concatMapAccumMS, f x0)
 
@@ -602,7 +651,7 @@ STREAMING(concatMapAccumM, concatMapAccumMC, concatMapAccumMS, f x0)
 -- Subject to fusion
 --
 -- Since 1.0.6
-mapFoldable, mapFoldableC :: (Monad m, F.Foldable f) => (a -> f b) -> Conduit a m b
+mapFoldable, mapFoldableC :: (Monad m, F.Foldable f) => (a -> f b) -> ConduitT a b m ()
 mapFoldableC f = awaitForever $ F.mapM_ yield . f
 {-# INLINE mapFoldableC #-}
 STREAMING(mapFoldable, mapFoldableC, mapFoldableS, f)
@@ -612,19 +661,18 @@ STREAMING(mapFoldable, mapFoldableC, mapFoldableS, f)
 -- Subject to fusion
 --
 -- Since 1.0.6
-mapFoldableM, mapFoldableMC :: (Monad m, F.Foldable f) => (a -> m (f b)) -> Conduit a m b
+mapFoldableM, mapFoldableMC :: (Monad m, F.Foldable f) => (a -> m (f b)) -> ConduitT a b m ()
 mapFoldableMC f = awaitForever $ F.mapM_ yield <=< lift . f
 {-# INLINE mapFoldableMC #-}
 STREAMING(mapFoldableM, mapFoldableMC, mapFoldableMS, f)
 
 -- | Consume all values from the stream and return as a list. Note that this
--- will pull all values into memory. For a lazy variant, see
--- "Data.Conduit.Lazy".
+-- will pull all values into memory.
 --
 -- Subject to fusion
 --
 -- Since 0.3.0
-consume, consumeC :: Monad m => Consumer a m [a]
+consume, consumeC :: Monad m => ConduitT a o m [a]
 consumeC =
     loop id
   where
@@ -632,12 +680,28 @@ consumeC =
 {-# INLINE consumeC #-}
 STREAMING0(consume, consumeC, consumeS)
 
+-- | Group a stream into chunks of a given size. The last chunk may contain
+-- fewer than n elements.
+--
+-- Subject to fusion
+--
+-- Since 1.2.9
+chunksOf :: Monad m => Int -> ConduitT a [a] m ()
+chunksOf n = if n > 0 then loop n id else error $ "chunksOf size must be positive (given " ++ show n ++ ")"
+  where
+    loop 0 rest = yield (rest []) >> loop n id
+    loop count rest = await >>= \ma -> case ma of
+      Nothing -> case rest [] of
+        [] -> return ()
+        nonempty -> yield nonempty
+      Just a -> loop (count - 1) (rest . (a :))
+
 -- | Grouping input according to an equality function.
 --
 -- Subject to fusion
 --
 -- Since 0.3.0
-groupBy, groupByC :: Monad m => (a -> a -> Bool) -> Conduit a m [a]
+groupBy, groupByC :: Monad m => (a -> a -> Bool) -> ConduitT a [a] m ()
 groupByC f =
     start
   where
@@ -660,14 +724,14 @@ STREAMING(groupBy, groupByC, groupByS, f)
 -- > import Data.List.NonEmpty
 -- >
 -- > groupOn1 :: (Monad m, Eq b) => (a -> b) -> Conduit a m (NonEmpty a)
--- > groupOn1 f = CL.groupOn1 f =$= CL.map (uncurry (:|))
+-- > groupOn1 f = CL.groupOn1 f .| CL.map (uncurry (:|))
 --
 -- Subject to fusion
 --
 -- Since 1.1.7
 groupOn1, groupOn1C :: (Monad m, Eq b)
                      => (a -> b)
-                     -> Conduit a m (a, [a])
+                     -> ConduitT a (a, [a]) m ()
 groupOn1C f =
     start
   where
@@ -696,7 +760,7 @@ STREAMING(groupOn1, groupOn1C, groupOn1S, f)
 -- Subject to fusion
 --
 -- Since 0.3.0
-isolate, isolateC :: Monad m => Int -> Conduit a m a
+isolate, isolateC :: Monad m => Int -> ConduitT a a m ()
 isolateC =
     loop
   where
@@ -709,24 +773,28 @@ STREAMING(isolate, isolateC, isolateS, count)
 -- Subject to fusion
 --
 -- Since 0.3.0
-filter, filterC :: Monad m => (a -> Bool) -> Conduit a m a
+filter, filterC :: Monad m => (a -> Bool) -> ConduitT a a m ()
 filterC f = awaitForever $ \i -> when (f i) (yield i)
 STREAMING(filter, filterC, filterS, f)
 
-filterFuseRight :: Monad m => Source m a -> (a -> Bool) -> Source m a
-filterFuseRight (CI.ConduitM src) f = CI.ConduitM $ \rest -> let
+filterFuseRight
+  :: Monad m
+  => ConduitT i o m ()
+  -> (o -> Bool)
+  -> ConduitT i o m ()
+filterFuseRight (CI.ConduitT src) f = CI.ConduitT $ \rest -> let
     go (CI.Done ()) = rest ()
     go (CI.PipeM mp) = CI.PipeM (liftM go mp)
     go (CI.Leftover p i) = CI.Leftover (go p) i
-    go (CI.HaveOutput p c o)
-        | f o = CI.HaveOutput (go p) c o
+    go (CI.HaveOutput p o)
+        | f o = CI.HaveOutput (go p) o
         | otherwise = go p
     go (CI.NeedInput p c) = CI.NeedInput (go . p) (go . c)
     in go (src CI.Done)
 -- Intermediate finalizers are dropped, but this is acceptable: the next
 -- yielded value would be demanded by downstream in any event, and that new
 -- finalizer will always override the existing finalizer.
-{-# RULES "conduit: source/filter fusion =$=" forall f src. src =$= filter f = filterFuseRight src f #-}
+{-# RULES "conduit: source/filter fusion .|" forall f src. src .| filter f = filterFuseRight src f #-}
 {-# INLINE filterFuseRight #-}
 
 -- | Ignore the remainder of values in the source. Particularly useful when
@@ -735,22 +803,22 @@ filterFuseRight (CI.ConduitM src) f = CI.ConduitM $ \rest -> let
 -- Subject to fusion
 --
 -- Since 0.3.0
-sinkNull, sinkNullC :: Monad m => Consumer a m ()
+sinkNull, sinkNullC :: Monad m => ConduitT i o m ()
 sinkNullC = awaitForever $ \_ -> return ()
 {-# INLINE sinkNullC #-}
 STREAMING0(sinkNull, sinkNullC, sinkNullS)
 
-srcSinkNull :: Monad m => Source m a -> m ()
-srcSinkNull (CI.ConduitM src) =
+srcSinkNull :: Monad m => ConduitT () o m () -> m ()
+srcSinkNull (CI.ConduitT src) =
     go (src CI.Done)
   where
     go (CI.Done ()) = return ()
     go (CI.PipeM mp) = mp >>= go
     go (CI.Leftover p ()) = go p
-    go (CI.HaveOutput p _ _) = go p
+    go (CI.HaveOutput p _) = go p
     go (CI.NeedInput _ c) = go (c ())
 {-# INLINE srcSinkNull #-}
-{-# RULES "conduit: connect to sinkNull" forall src. src $$ sinkNull = srcSinkNull src #-}
+{-# RULES "conduit: connect to sinkNull" forall src. runConduit (src .| sinkNull) = srcSinkNull src #-}
 
 -- | A source that outputs no values. Note that this is just a type-restricted
 -- synonym for 'mempty'.
@@ -758,7 +826,7 @@ srcSinkNull (CI.ConduitM src) =
 -- Subject to fusion
 --
 -- Since 0.3.0
-sourceNull, sourceNullC :: Monad m => Producer m a
+sourceNull, sourceNullC :: Monad m => ConduitT i o m ()
 sourceNullC = return ()
 {-# INLINE sourceNullC #-}
 STREAMING0(sourceNull, sourceNullC, sourceNullS)
@@ -768,8 +836,8 @@ STREAMING0(sourceNull, sourceNullC, sourceNullS)
 --
 -- Since 0.5.0
 sequence :: Monad m
-         => Consumer i m o -- ^ @Pipe@ to run repeatedly
-         -> Conduit i m o
+         => ConduitT i o m o -- ^ @Pipe@ to run repeatedly
+         -> ConduitT i o m ()
 sequence sink =
     self
   where

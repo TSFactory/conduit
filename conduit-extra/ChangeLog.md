@@ -1,3 +1,85 @@
+# ChangeLog for conduit-extra
+
+## 1.3.5
+
+* Add `createSinkClose`
+
+## 1.3.4
+
+* Use `MonadUnliftIO`-generalized versions of `withProcess`-style functions now provided by `typed-process`
+
+## 1.3.3
+
+* Disable buffering in process modules [#402](https://github.com/snoyberg/conduit/issues/402)
+
+## 1.3.2
+
+* Expose `BuilderInput` and `FlushInput`.
+
+## 1.3.1.1
+
+* Attempt to fix a test suite failure [#385](https://github.com/snoyberg/conduit/issues/385)
+
+## 1.3.1
+
+* Switched `gzip` to use zlib's default compression level.
+
+## 1.3.0
+
+* Switch over to unliftio
+* Upgrade to conduit 1.3.0
+
+## 1.2.3.2
+
+* Fix withSinkFileBuilder [#344](https://github.com/snoyberg/conduit/pull/344)
+
+## 1.2.3.1
+
+* Fix typo in implementation of `withProcess_`
+
+## 1.2.3
+
+* Added `withLoggedProcess_`
+
+## 1.2.2.1
+
+* Add missing `hClose` to `withSinkFileCautious`
+
+## 1.2.2
+
+* `sinkHandleBuilder`, `sinkHandleFlush`, `BuilderInput`, and `FlushInput`
+  [#336](https://github.com/snoyberg/conduit/pull/336)
+* `withSinkFileCautious`
+
+## 1.2.1
+
+* `Data.Conduit.Process.Typed`
+* `withSourceFile`, `withSinkFile`, and `withSinkFileBuilder`
+
+## 1.2.0
+
+* Added the `posOffset` field to the
+  `Data.Conduit.Attoparsec.Position` data type
+  [#331](https://github.com/snoyberg/conduit/issues/331).
+
+## 1.1.17
+
+* Speed up `sinkHandle` by not flushing after every output operation.
+  [#322](https://github.com/snoyberg/conduit/issues/322)
+
+## 1.1.16
+
+* Add `Data.Conduit.Foldl` adapter module for the `foldl`
+  package. [#312](https://github.com/snoyberg/conduit/pull/312)
+
+## 1.1.15
+
+* `sinkTempFile` and `sinkSystemTempFile`
+
+## 1.1.14
+
+* `sinkFileCautious`
+
 ## 1.1.13.3
 
 * `withCheckedProcessCleanup` properly closes opened `Handle`s

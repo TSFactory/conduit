@@ -2,11 +2,11 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 
 import           Control.Concurrent
-import           Control.Concurrent.Lifted    (fork)
 import           Control.Exception            (Exception, MaskingState (MaskedInterruptible),
-                                               getMaskingState, throwIO, try)
+                                               getMaskingState, throwIO, try, fromException)
 import           Control.Exception            (SomeException, handle)
-import           Control.Monad                (unless)
+import           Control.Monad                (unless, void)
+import qualified Control.Monad.Catch
 import           Control.Monad.IO.Class       (liftIO)
 import           Control.Monad.Trans.Resource
 import           Data.IORef
@@ -18,7 +18,7 @@ main :: IO ()
 main = hspec $ do
     describe "general" $ do
         it "survives releasing bottom" $ do
-            x <- newIORef 0
+            x <- newIORef (0 :: Int)
             handle (\(_ :: SomeException) -> return ()) $ runResourceT $ do
                 _ <- register $ writeIORef x 1
                 release undefined
@@ -26,7 +26,7 @@ main = hspec $ do
             x' `shouldBe` 1
     describe "early release" $ do
         it "works from a different context" $ do
-            x <- newIORef 0
+            x <- newIORef (0 :: Int)
             runResourceT $ do
                 key <- register $ writeIORef x 1
                 runResourceT $ release key
@@ -35,11 +35,11 @@ main = hspec $ do
     describe "resourceForkIO" $ do
         it "waits for all threads" $ do
             x <- newEmptyMVar
-            y <- newIORef 0
+            y <- newIORef (0 :: Int)
             z <- newEmptyMVar
             w <- newEmptyMVar
 
-            runResourceT $ do
+            _ <- runResourceT $ do
                 _ <- register $ do
                     writeIORef y 1
                     putMVar w ()
@@ -62,8 +62,8 @@ main = hspec $ do
             Just y2 `shouldBe` Just 1
     describe "unprotecting" $ do
         it "unprotect keeps resource from being cleared" $ do
-            x <- newIORef 0
-            runResourceT $ do
+            x <- newIORef (0 :: Int)
+            _ <- runResourceT $ do
               key <- register $ writeIORef x 1
               unprotect key
             y <- readIORef x
@@ -73,11 +73,11 @@ main = hspec $ do
                 ms <- getMaskingState
                 unless (ms == MaskedInterruptible) $
                     error $ show (name, ms)
-        runResourceT $ do
+        _ <- runResourceT $ do
             register (checkMasked "release") >>= release
             register (checkMasked "normal")
         Left Dummy <- try $ runResourceT $ do
-            register (checkMasked "exception")
+            _ <- register (checkMasked "exception")
             liftIO $ throwIO Dummy
         return ()
     describe "mkAcquireType" $ do
@@ -114,18 +114,38 @@ main = hspec $ do
                 let acq = mkAcquireType (return ()) $ \() -> writeIORef ref . Just
                 Left Dummy <- try $ with acq $ const $ throwIO Dummy
                 readIORef ref >>= (`shouldBe` Just ReleaseException)
-        describe "withEx" $ do
-            it "normal" $ do
-                ref <- newIORef Nothing
-                let acq = mkAcquireType (return ()) $ \() -> writeIORef ref . Just
-                withEx acq $ const $ return ()
-                readIORef ref >>= (`shouldBe` Just ReleaseNormal)
-            it "exception" $ do
-                ref <- newIORef Nothing
-                let acq = mkAcquireType (return ()) $ \() -> writeIORef ref . Just
-                Left Dummy <- try $ withEx acq $ const $ throwIO Dummy
-                readIORef ref >>= (`shouldBe` Just ReleaseException)
+    describe "runResourceTChecked" $ do
+        it "catches exceptions" $ do
+            eres <- try $ runResourceTChecked $ void $ register $ throwIO Dummy
+            case eres of
+              Right () -> error "Expected an exception"
+              Left (ResourceCleanupException Nothing ex []) ->
+                case fromException ex of
+                  Just Dummy -> return ()
+                  Nothing -> error "It wasn't Dummy"
+              Left (ResourceCleanupException (Just _) _ []) -> error "Got a ResourceT exception"
+              Left (ResourceCleanupException _ _ (_:_)) -> error "Got more than one"
+        it "no exception is fine" $ (runResourceTChecked $ void $ register $ return () :: IO ())
+        it "catches multiple exceptions" $ do
+            eres <- try $ runResourceTChecked $ do
+              void $ register $ throwIO Dummy
+              void $ register $ throwIO Dummy2
+            case eres of
+              Right () -> error "Expected an exception"
+              Left (ResourceCleanupException Nothing ex1 [ex2]) ->
+                case (fromException ex1, fromException ex2) of
+                  (Just Dummy, Just Dummy2) -> return ()
+                  _ -> error $ "It wasn't Dummy, Dummy2: " ++ show (ex1, ex2)
+              Left (ResourceCleanupException (Just _) _ [_]) -> error "Got a ResourceT exception"
+              Left (ResourceCleanupException _ _ []) -> error "Only got 1"
+              Left (ResourceCleanupException _ _ (_:_:_)) -> error "Got more than 2"
+    describe "MonadMask" $
+        it "works" (runResourceT $ Control.Monad.Catch.bracket (return ()) (const (return ())) (const (return ())) :: IO ())
 
 data Dummy = Dummy
     deriving (Show, Typeable)
 instance Exception Dummy
+
+data Dummy2 = Dummy2
+    deriving (Show, Typeable)
+instance Exception Dummy2

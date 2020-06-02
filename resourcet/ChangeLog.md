@@ -1,3 +1,42 @@
+# ChangeLog for resourcet
+
+## 1.2.3
+
+* Support `unliftio-core` 0.2.0.0
+
+## 1.2.2
+
+* Add `MonadFail` instance for `ResourceT`.
+
+## 1.2.1
+
+* Support `exceptions-0.10`.
+
+## 1.2.0
+
+* Drop `monad-control` and `mmorph` dependencies
+* Change behavior of `runResourceT` to match `runResourceTChecked`
+
+## 1.1.11
+
+* `runResourceTChecked`, which checks if any of the cleanup actions
+  threw exceptions and, if so, rethrows them. __NOTE__ This is
+  probably a much better choice of function than `runResourceT`, and
+  in the next major version release, will become the new behavior of
+  `runResourceT`.
+
+## 1.1.10
+
+* Added `MonadUnliftIO` instances and `UnliftIO.Resource`
+
+## 1.1.9
+
+* Add generalized version of resourceForkIO
+
+## 1.1.8.1
+
+* Allocation actions should be masked
+
 ## 1.1.8
 
 * Add `instance MonadFix ResourceT`

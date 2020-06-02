@@ -1,3 +1,77 @@
+# ChangeLog for conduit
+
+## 1.3.2
+
+* Add `mapInputM` [#435](https://github.com/snoyberg/conduit/pull/435)
+
+## 1.3.1.2
+
+* More eagerly emit groups in `chunksOf` [#427](https://github.com/snoyberg/conduit/pull/427)
+
+## 1.3.1.1
+
+* Use lower-case imports (better for cross-compilation) [#408](https://github.com/snoyberg/conduit/pull/408)
+
+## 1.3.1
+
+* Add `MonadFail` instance for `ConduitT`.
+
+## 1.3.0.3
+
+* Improve fusion framework rewrite rules
+
+## 1.3.0.2
+
+* Replace `ReadMode` with `WriteMode` in `withSinkFile`
+
+## 1.3.0.1
+
+* Test suite compatibility with GHC 8.4.1 [#358](https://github.com/snoyberg/conduit/issues/358)
+
+## 1.3.0
+
+* Drop monad-control and exceptions in favor of unliftio
+* Drop mmorph dependency
+* Deprecate old type synonyms and operators
+* Drop finalizers from the library entirely
+    * Much simpler
+    * Less guarantees about prompt finalization
+    * No more `yieldOr`, `addCleanup`
+    * Replace the `Resumable` types with `SealedConduitT`
+* Add the `Conduit` and `Data.Conduit.Combinators` modules, stolen from
+  `conduit-combinators`
+
+## 1.2.13
+
+* Add `Semigroup` instances [#345](https://github.com/snoyberg/conduit/pull/345)
+
+## 1.2.12.1
+
+* Fix `pass` in `ConduitM` `MonadWriter` instance
+
+## 1.2.12
+
+* Add `exceptC`, `runExceptC` and `catchExceptC` to `Data.Conduit.Lift`
+
+## 1.2.11
+
+* Add `unfoldEither` and `unfoldEitherM` to `Data.Conduit.List`
+
+## 1.2.10
+
+* Add `PrimMonad` instances for `ConduitM` and `Pipe`
+  [#306](https://github.com/snoyberg/conduit/pull/306)
+
+## 1.2.9.1
+
+* Ensure downstream and inner sink receive same inputs in
+  `passthroughSink`
+  [#304](https://github.com/snoyberg/conduit/issues/304)
+
+## 1.2.9
+
+* `chunksOf` [#296](https://github.com/snoyberg/conduit/pull/296)
+
 ## 1.2.8
 
 * Implement

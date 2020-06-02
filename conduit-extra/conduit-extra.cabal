@@ -1,5 +1,5 @@
 Name:                conduit-extra
-Version:             1.1.13.3
+Version:             1.3.5
 Synopsis:            Batteries included conduit: adapters for common libraries.
 Description:
     The conduit package itself maintains relative small dependencies. The purpose of this package is to collect commonly used utility functions wrapping other library dependencies, without depending on heavier-weight dependencies. The basic idea is that this package should only depend on haskell-platform packages and conduit.
@@ -21,13 +21,14 @@ extra-source-files:
 Library
   Exposed-modules:     Data.Conduit.Attoparsec
                        Data.Conduit.Binary
-                       Data.Conduit.Blaze
                        Data.Conduit.ByteString.Builder
                        Data.Conduit.Filesystem
+                       Data.Conduit.Foldl
                        Data.Conduit.Lazy
                        Data.Conduit.Network
                        Data.Conduit.Network.UDP
                        Data.Conduit.Process
+                       Data.Conduit.Process.Typed
                        Data.Conduit.Text
                        Data.Conduit.Zlib
   if !os(windows)
@@ -37,21 +38,15 @@ Library
       -- These architectures are able to perform unaligned memory accesses
       cpp-options: -DALLOW_UNALIGNED_ACCESS
 
-  Build-depends:       base                     >= 4.5          && < 5
-                     , conduit                  >= 1.1          && < 1.3
+  Build-depends:       base                     >= 4.9          && < 5
+                     , conduit                  >= 1.3          && < 1.4
 
-                       -- No version bounds necessary, since they're inherited
-                       -- from conduit.
-                     , bytestring
-                     , exceptions
-                     , monad-control
+                     , bytestring               >= 0.10.2
                      , text
                      , transformers
-                     , transformers-base
 
                      , async
                      , attoparsec               >= 0.10
-                     , blaze-builder            >= 0.3
                      , directory
                      , filepath
                      , network                  >= 2.3
@@ -60,6 +55,8 @@ Library
                      , resourcet                >= 1.1
                      , stm
                      , streaming-commons        >= 0.1.16
+                     , unliftio-core
+                     , typed-process            >= 0.2.6
 
   ghc-options:     -Wall
 
@@ -76,7 +73,6 @@ test-suite test
 
                    , async
                    , attoparsec
-                   , blaze-builder
                    , bytestring-builder
                    , bytestring
                    , exceptions
@@ -88,6 +84,8 @@ test-suite test
                    , text
                    , transformers
                    , transformers-base
+                   , directory
+                   , filepath
     ghc-options:     -Wall
     if os(windows)
         cpp-options: -DWINDOWS
@@ -99,6 +97,7 @@ test-suite test
                      Data.Conduit.LazySpec
                      Data.Conduit.NetworkSpec
                      Data.Conduit.ProcessSpec
+                     Data.Conduit.Process.TypedSpec
                      Data.Conduit.TextSpec
                      Data.Conduit.ZlibSpec
 
@@ -106,10 +105,9 @@ benchmark blaze
     type:           exitcode-stdio-1.0
     hs-source-dirs: bench
     build-depends:  base
-                  , blaze-builder
                   , conduit
                   , conduit-extra
-                  , criterion
+                  , gauge
                   , bytestring
                   , bytestring-builder
                   , transformers

@@ -3,8 +3,8 @@
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE CPP #-}
 {-# OPTIONS_GHC -fno-warn-orphans #-}
--- | A full tutorial for this module is available on FP School of Haskell:
--- <https://www.fpcomplete.com/user/snoyberg/library-documentation/data-conduit-process>.
+-- | A full tutorial for this module is available at:
+-- <https://github.com/snoyberg/conduit/blob/master/PROCESS.md>.
 --
 -- Note that this is a very thin layer around the @Data.Streaming.Process@ module. In particular, it:
 --
@@ -18,6 +18,9 @@ module Data.Conduit.Process
     , sourceCmdWithStreams
     , sourceProcessWithStreams
     , withCheckedProcessCleanup
+      -- * InputSource types
+    , FlushInput(..)
+    , BuilderInput(..)
       -- * Reexport
     , module Data.Streaming.Process
     ) where
@@ -25,26 +28,50 @@ module Data.Conduit.Process
 import Data.Streaming.Process
 import Data.Streaming.Process.Internal
 import System.Exit (ExitCode (..))
-import Control.Monad.IO.Class (MonadIO, liftIO)
-import System.IO (hClose)
+import Control.Monad.IO.Unlift (MonadIO, liftIO, MonadUnliftIO, withRunInIO, withUnliftIO, unliftIO)
+import System.IO (hClose, BufferMode (NoBuffering), hSetBuffering)
 import Data.Conduit
-import Data.Conduit.Binary (sourceHandle, sinkHandle)
+import Data.Functor (($>))
+import Data.Conduit.Binary (sourceHandle, sinkHandle, sinkHandleBuilder, sinkHandleFlush)
 import Data.ByteString (ByteString)
+import Data.ByteString.Builder (Builder)
 import Control.Concurrent.Async (runConcurrently, Concurrently(..))
-import Control.Monad.Catch (MonadMask, onException, throwM, finally, bracket)
+import Control.Exception (onException, throwIO, finally, bracket)
 #if (__GLASGOW_HASKELL__ < 710)
 import Control.Applicative ((<$>), (<*>))
 #endif
 
 instance (r ~ (), MonadIO m, i ~ ByteString) => InputSource (ConduitM i o m r) where
-    isStdStream = (\(Just h) -> return $ sinkHandle h, Just CreatePipe)
+    isStdStream = (\(Just h) -> hSetBuffering h NoBuffering $> sinkHandle h, Just CreatePipe)
 instance (r ~ (), r' ~ (), MonadIO m, MonadIO n, i ~ ByteString) => InputSource (ConduitM i o m r, n r') where
-    isStdStream = (\(Just h) -> return (sinkHandle h, liftIO $ hClose h), Just CreatePipe)
+    isStdStream = (\(Just h) -> hSetBuffering h NoBuffering $> (sinkHandle h, liftIO $ hClose h), Just CreatePipe)
+
+-- | Wrapper for input source which accepts 'Data.ByteString.Builder.Builder's.
+-- You can pass 'Data.ByteString.Builder.Extra.flush' to flush the input. Note
+-- that the pipe will /not/ automatically close when the processing completes.
+--
+-- @since 1.3.2
+newtype BuilderInput o m r = BuilderInput (ConduitM Builder o m r)
+
+-- | Wrapper for input source  which accepts @Flush@es. Note that the pipe
+-- will /not/ automatically close then processing completes.
+--
+-- @since 1.3.2
+newtype FlushInput o m r = FlushInput (ConduitM (Flush ByteString) o m r)
+
+instance (MonadIO m, r ~ ()) => InputSource (BuilderInput o m r) where
+  isStdStream = (\(Just h) -> return $ BuilderInput $ sinkHandleBuilder h, Just CreatePipe)
+instance (MonadIO m, MonadIO n, r ~ (), r' ~ ()) => InputSource (BuilderInput o m r, n r') where
+  isStdStream = (\(Just h) -> return (BuilderInput $ sinkHandleBuilder h, liftIO $ hClose h), Just CreatePipe)
+instance (MonadIO m, r ~ ()) => InputSource (FlushInput o m r) where
+  isStdStream = (\(Just h) -> return $ FlushInput $ sinkHandleFlush h, Just CreatePipe)
+instance (MonadIO m, MonadIO n, r ~ (), r' ~ ()) => InputSource (FlushInput o m r, n r') where
+  isStdStream = (\(Just h) -> return (FlushInput $ sinkHandleFlush h, liftIO $ hClose h), Just CreatePipe)
 
 instance (r ~ (), MonadIO m, o ~ ByteString) => OutputSink (ConduitM i o m r) where
-    osStdStream = (\(Just h) -> return $ sourceHandle h, Just CreatePipe)
+    osStdStream = (\(Just h) -> hSetBuffering h NoBuffering $> sourceHandle h, Just CreatePipe)
 instance (r ~ (), r' ~ (), MonadIO m, MonadIO n, o ~ ByteString) => OutputSink (ConduitM i o m r, n r') where
-    osStdStream = (\(Just h) -> return (sourceHandle h, liftIO $ hClose h), Just CreatePipe)
+    osStdStream = (\(Just h) -> hSetBuffering h NoBuffering $> (sourceHandle h, liftIO $ hClose h), Just CreatePipe)
 
 -- | Given a @CreateProcess@, run the process, with its output being used as a
 -- @Source@ to feed the provided @Consumer@. Once the process has completed,
@@ -58,11 +85,11 @@ instance (r ~ (), r' ~ (), MonadIO m, MonadIO n, o ~ ByteString) => OutputSink (
 -- Since 1.1.2
 sourceProcessWithConsumer :: MonadIO m
                           => CreateProcess
-                          -> Consumer ByteString m a -- ^ stdout
+                          -> ConduitT ByteString Void m a -- ^ stdout
                           -> m (ExitCode, a)
 sourceProcessWithConsumer cp consumer = do
     (ClosedStream, (source, close), ClosedStream, cph) <- streamingProcess cp
-    res <- source $$ consumer
+    res <- runConduit $ source .| consumer
     close
     ec <- waitForStreamingProcess cph
     return (ec, res)
@@ -73,7 +100,7 @@ sourceProcessWithConsumer cp consumer = do
 -- Since 1.1.2
 sourceCmdWithConsumer :: MonadIO m
                       => String                  -- ^command
-                      -> Consumer ByteString m a -- ^stdout
+                      -> ConduitT ByteString Void m a -- ^stdout
                       -> m (ExitCode, a)
 sourceCmdWithConsumer cmd = sourceProcessWithConsumer (shell cmd)
 
@@ -94,12 +121,15 @@ sourceCmdWithConsumer cmd = sourceProcessWithConsumer (shell cmd)
 -- using the <https://hackage.haskell.org/package/async async> package
 --
 -- @since 1.1.12
-sourceProcessWithStreams :: CreateProcess
-                         -> Producer IO ByteString   -- ^stdin
-                         -> Consumer ByteString IO a -- ^stdout
-                         -> Consumer ByteString IO b -- ^stderr
-                         -> IO (ExitCode, a, b)
-sourceProcessWithStreams cp producerStdin consumerStdout consumerStderr = do
+sourceProcessWithStreams
+  :: MonadUnliftIO m
+  => CreateProcess
+  -> ConduitT () ByteString m () -- ^stdin
+  -> ConduitT ByteString Void m a -- ^stdout
+  -> ConduitT ByteString Void m b -- ^stderr
+  -> m (ExitCode, a, b)
+sourceProcessWithStreams cp producerStdin consumerStdout consumerStderr =
+  withUnliftIO $ \u -> do
     (  (sinkStdin, closeStdin)
      , (sourceStdout, closeStdout)
      , (sourceStderr, closeStderr)
@@ -107,9 +137,9 @@ sourceProcessWithStreams cp producerStdin consumerStdout consumerStderr = do
     (_, resStdout, resStderr) <-
       runConcurrently (
         (,,)
-        <$> Concurrently ((producerStdin $$ sinkStdin) `finally` closeStdin)
-        <*> Concurrently (sourceStdout  $$ consumerStdout)
-        <*> Concurrently (sourceStderr  $$ consumerStderr))
+        <$> Concurrently ((unliftIO u $ runConduit $ producerStdin .| sinkStdin) `finally` closeStdin)
+        <*> Concurrently (unliftIO u $ runConduit $ sourceStdout .| consumerStdout)
+        <*> Concurrently (unliftIO u $ runConduit $ sourceStderr .| consumerStderr))
       `finally` (closeStdout >> closeStderr)
       `onException` terminateStreamingProcess sph
     ec <- waitForStreamingProcess sph
@@ -119,11 +149,13 @@ sourceProcessWithStreams cp producerStdin consumerStdout consumerStderr = do
 -- a @String@.
 --
 -- @since 1.1.12
-sourceCmdWithStreams :: String                   -- ^command
-                     -> Producer IO ByteString   -- ^stdin
-                     -> Consumer ByteString IO a -- ^stdout
-                     -> Consumer ByteString IO b -- ^stderr
-                     -> IO (ExitCode, a, b)
+sourceCmdWithStreams
+  :: MonadUnliftIO m
+  => String                   -- ^command
+  -> ConduitT () ByteString m () -- ^stdin
+  -> ConduitT ByteString Void m a -- ^stdout
+  -> ConduitT ByteString Void m b -- ^stderr
+  -> m (ExitCode, a, b)
 sourceCmdWithStreams cmd = sourceProcessWithStreams (shell cmd)
 
 -- | Same as 'withCheckedProcess', but kills the child process in the case of
@@ -134,22 +166,21 @@ withCheckedProcessCleanup
     :: ( InputSource stdin
        , OutputSink stderr
        , OutputSink stdout
-       , MonadIO m
-       , MonadMask m
+       , MonadUnliftIO m
        )
     => CreateProcess
     -> (stdin -> stdout -> stderr -> m b)
     -> m b
-withCheckedProcessCleanup cp f = bracket
+withCheckedProcessCleanup cp f = withRunInIO $ \run -> bracket
     (streamingProcess cp)
     (\(_, _, _, sph) -> closeStreamingProcessHandle sph)
     $ \(x, y, z, sph) -> do
-        res <- f x y z `onException` liftIO (terminateStreamingProcess sph)
+        res <- run (f x y z) `onException` terminateStreamingProcess sph
         ec <- waitForStreamingProcess sph
         if ec == ExitSuccess
             then return res
-            else throwM $ ProcessExitedUnsuccessfully cp ec
+            else throwIO $ ProcessExitedUnsuccessfully cp ec
 
 
-terminateStreamingProcess :: StreamingProcessHandle -> IO ()
-terminateStreamingProcess = terminateProcess . streamingProcessHandleRaw
+terminateStreamingProcess :: MonadIO m => StreamingProcessHandle -> m ()
+terminateStreamingProcess = liftIO . terminateProcess . streamingProcessHandleRaw
